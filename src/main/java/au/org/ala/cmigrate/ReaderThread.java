@@ -1,6 +1,8 @@
 package au.org.ala.cmigrate;
 
 import au.org.ala.cmigrate.maps.AbstractMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import me.prettyprint.cassandra.model.AllOneConsistencyLevelPolicy;
 import me.prettyprint.cassandra.serializers.StringSerializer;
 import me.prettyprint.cassandra.service.CassandraHostConfigurator;
@@ -16,6 +18,8 @@ import me.prettyprint.hector.api.query.RangeSlicesQuery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.util.Iterator;
 import java.util.ListIterator;
 import java.util.Map;
 import java.util.TreeMap;
@@ -86,7 +90,12 @@ public class ReaderThread implements Runnable {
         ListIterator<HColumn<String, String>> columnIterator = row.getColumnSlice().getColumns().listIterator();
         while (columnIterator.hasNext()){
             HColumn<String, String> column = columnIterator.next();
-            record.put(column.getName(), column.getValue());
+            if (!column.getName().endsWith(".p")) {
+                record.put(column.getName(), column.getValue());
+            }
+            if (!column.getName().equalsIgnoreCase("sensitive")) {
+                record.put(column.getName(), column.getValue());
+            }
         }
 
 		for (Map.Entry<String, String> entry : record.entrySet()) {
@@ -96,9 +105,24 @@ public class ReaderThread implements Runnable {
 		if (!colvals.containsKey("rowkey") || colvals.get("rowkey") == null) {
 			colvals.put("rowkey", row.getKey());
 		}
-
 		if (colvals.containsKey("originalSensitiveValues") || colvals.get("originalSensitiveValues") != null) {
-			colvals.put("originalSensitiveValues", colvals.get("originalSensitiveValues").replaceAll("\\.p\":", "_p\":"));
+            String originalSensitiveValues = colvals.get("originalSensitiveValues");
+            ObjectMapper mapper = new ObjectMapper();
+            try {
+                JsonNode fields = mapper.readTree(originalSensitiveValues);
+                if (fields != null){
+                    for (Iterator<Map.Entry<String, JsonNode>> it = fields.fields(); it.hasNext(); ) {
+                        Map.Entry<String, JsonNode> field = it.next();
+                        if (!field.getKey().endsWith(".p")) {
+                            colvals.put(field.getKey(), field.getValue().textValue());
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }finally {
+                colvals.remove("originalSensitiveValues");
+            }
 		}
 
 
