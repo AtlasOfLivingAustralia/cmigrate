@@ -25,3 +25,6 @@ pom.xml.versionsBackup
 *.iws
 *.ipr
 /out/
+.DS_Store
+
+cass1-cass3.yaml

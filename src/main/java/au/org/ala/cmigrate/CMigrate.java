@@ -5,8 +5,12 @@ import com.datastax.driver.core.ResultSet;
 import com.datastax.driver.core.Row;
 import com.datastax.driver.core.exceptions.InvalidQueryException;
 import com.datastax.driver.core.exceptions.OperationTimedOutException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import org.apache.commons.cli.*;
+import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.builder.ToStringStyle;
 import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.SolrQuery;
 import org.apache.solr.client.solrj.SolrServerException;
@@ -15,6 +19,7 @@ import org.apache.solr.client.solrj.response.QueryResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -31,18 +36,7 @@ public class CMigrate {
     private static final Logger log = LoggerFactory.getLogger(CMigrate.class);
 
     private static final int DEFAULT_QUEUE_SIZE = 1000;
-    private static final String DEFAULT_START_KEY = "";
-    private static final String DEFAULT_END_KEY = "~";
-    private static final String DEFAULT_PAGE_SIZE = "1000";
-    private static final String DEFAULT_READ_THREADS = "4";
-    private static final String DEFAULT_WRITE_THREADS = "4";
-    private static final String DEFAULT_SOLR_BASE = "http://localhost:8080/solr/biocache";
-    private static final String DEFAULT_SOURCE_DB = "cassandra-b4.ala.org.au:9160";
-    private static final String DEFAULT_TARGET_DB = "aws-cass-cluster-1.ala.org.au,aws-cass-cluster-4.ala.org.au,aws-cass-cluster-3.ala.org.au";
-    private static final String DEFAULT_COLUMN_FAMILY = "occ";
-    private static final String DEFAULT_KEY_SPACE = "occ";
-    private static final String DEFAULT_CLUSTER_NAME = "Biocache";
-    private static final Boolean DEFAULT_SYNC = false;
+    private static final String DEFAULT_APP_CONFIG = "./cass1-cass3.yaml";
 
     public static Map<String, String> getOccKeyRanges(final String startKey, final String endKey, final int readThreads,
                                                       final String solrBase) throws IOException, SolrServerException {
@@ -167,13 +161,13 @@ public class CMigrate {
         final BlockingQueue<Map<String, String>> queue = new ArrayBlockingQueue<>(DEFAULT_QUEUE_SIZE);
         final BlockingQueue<ErrorRecord> errorQueue = new ArrayBlockingQueue<>(DEFAULT_QUEUE_SIZE);
         final BlockingQueue<ResultRecordPair> resultQueue = new ArrayBlockingQueue<>(DEFAULT_QUEUE_SIZE * 2);
-        final BlockingQueue<ResultRecordPair> retryQueue = new ArrayBlockingQueue(DEFAULT_QUEUE_SIZE*2);
+        final BlockingQueue<ResultRecordPair> retryQueue = new ArrayBlockingQueue(DEFAULT_QUEUE_SIZE * 2);
 
         AtomicInteger writeCounter = new AtomicInteger(0);
 
         Object sentinel = new Object();
 
-        final int resultCheckerThreads = (writeThreads/2 > 0)? writeThreads/2  : 1 ;
+        final int resultCheckerThreads = (writeThreads / 2 > 0) ? writeThreads / 2 : 1;
 
         final CassandraCluster cassandraCluster = setupCassandraCluster(clusterName, columnFamily, keySpace, map, targetDb);
 
@@ -213,7 +207,7 @@ public class CMigrate {
         }
     }
 
-    private static void waitForExecutorCompletion(String executorName, ExecutorService executor)  {
+    private static void waitForExecutorCompletion(String executorName, ExecutorService executor) {
         int executorWait = 0;
         try {
             while (!executor.awaitTermination(30, TimeUnit.MINUTES) && !Thread.currentThread().isInterrupted()
@@ -221,9 +215,9 @@ public class CMigrate {
                 executorWait++;
                 log.warn("Executor {} not complete after {} hours, waiting for them again", executorName, executorWait / 2.0);
             }
-            if(executorWait < 144)
+            if (executorWait < 144)
                 log.info("Executor {} was completed successfully.", executorName);
-        }catch (InterruptedException e){
+        } catch (InterruptedException e) {
             log.error("InterruptedException occurred for {} ", executorName);
         } finally {
             if (!executor.isTerminated()) {
@@ -244,8 +238,8 @@ public class CMigrate {
                     sentinelWait++;
                     log.warn("Waiting for queue to accept sentinel ({} minutes elapsed)", sentinelWait);
                 }
-            } catch (InterruptedException e){
-                log.error("InterruptedException occurred" );
+            } catch (InterruptedException e) {
+                log.error("InterruptedException occurred");
             }
         }
     }
@@ -298,7 +292,7 @@ public class CMigrate {
         final AtomicInteger verifiedRowCount = new AtomicInteger(0);
         final ExecutorService resultExecutor = Executors.newFixedThreadPool(resultCheckerThreads);
         for (int i = 0; i < resultCheckerThreads; i++) {
-            resultExecutor.execute(new Thread(new ResultCheckerThread(resultQueue, queue, errorQueue, retryQueue,  sentinel, writeCount, verifiedRowCount)));
+            resultExecutor.execute(new Thread(new ResultCheckerThread(resultQueue, queue, errorQueue, retryQueue, sentinel, writeCount, verifiedRowCount)));
         }
         return resultExecutor;
     }
@@ -332,7 +326,7 @@ public class CMigrate {
                 .setErrorQueue(errorqueue)
                 .setQueue(queue)
                 .setPageSize(pageSize)
-                .setKeySpaceName(keySpace)
+                .setKeySpaceName("occ")
                 .setHostIp(sourceDb)
                 .setRowCount(new AtomicInteger(0));
         for (Map.Entry<String, String> entry : keyRanges.entrySet()) {
@@ -356,6 +350,65 @@ public class CMigrate {
         return fieldSet;
     }
 
+    static Config readConfig(String filePath) throws IOException {
+        ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
+        Config config = null;
+        config = mapper.readValue(new File(filePath), Config.class);
+        log.info("Config is used:\n" + ReflectionToStringBuilder.toString(config, ToStringStyle.MULTI_LINE_STYLE));
+        return config;
+    }
+
+    static void migrateCass1ToCass3(Config config) throws IOException, SolrServerException, InterruptedException, ParseException {
+        final String startKey = config.getStartKey();
+        final String endKey = config.getEndKey();
+        final int pageSize = config.getPageSize();
+        final int readThreads = config.getReadThreads();
+        final int writeThreads = config.getWriteThreads();
+        final Boolean sync = config.isSyncSchema();
+        final String solrBase = config.getSolrBase();
+
+        final String[] columnFamilies = config.getSource().get("columnFamily").split(",");
+        final String keySpace = config.getSource().get("keySpace");
+        final String clusterName = config.getSource().get("clusterName");
+        final String sourcedb = config.getSource().get("db");
+        final String[] targetdb = config.getTarget().get("db").split(",");
+
+
+        final Map<String, String> keyRanges = new TreeMap<>();
+        keyRanges.put(startKey, endKey);
+        for (String columnFamily : columnFamilies) {
+            switch (columnFamily) {
+                case "occ":
+                    final Map<String, String> occKeyRanges = getOccKeyRanges(startKey, endKey, readThreads, solrBase);
+                    copyColumnFmaily(clusterName, columnFamily, keySpace, occKeyRanges, new OccMapper(keySpace, columnFamily), sourcedb,
+                            targetdb, readThreads, writeThreads, pageSize, solrBase, sync);
+                    break;
+                case "loc":
+                    copyColumnFmaily(clusterName, columnFamily, keySpace, keyRanges, new LocMapper(keySpace, columnFamily), sourcedb,
+                            targetdb, readThreads, writeThreads, pageSize, solrBase, sync);
+                    break;
+                case "attr":
+                    copyColumnFmaily(clusterName, columnFamily, keySpace, keyRanges, new AttrMapper(keySpace, columnFamily), sourcedb,
+                            targetdb, readThreads, writeThreads, pageSize, solrBase, sync);
+                    break;
+                case "qid":
+                    copyColumnFmaily(clusterName, columnFamily, keySpace, keyRanges, new QidMapper(keySpace, columnFamily), sourcedb,
+                            targetdb, readThreads, writeThreads, pageSize, solrBase, sync);
+                    break;
+                case "qa":
+                    copyColumnFmaily(clusterName, columnFamily, keySpace, keyRanges, new QaMapper(keySpace, columnFamily), sourcedb,
+                            targetdb, readThreads, writeThreads, pageSize, solrBase, sync);
+                    break;
+                case "taxon":
+                    copyColumnFmaily(clusterName, columnFamily, keySpace, keyRanges, new QaMapper(keySpace, columnFamily), sourcedb,
+                            targetdb, readThreads, writeThreads, pageSize, solrBase, sync);
+                    break;
+                default:
+                    throw new ParseException("Invalid name for columnFamily: " + columnFamily);
+            }
+        }
+
+    }
 
     public static void main(String... args) throws Exception {
 
@@ -375,26 +428,7 @@ public class CMigrate {
 
         final Options options = new Options();
         options.addOption("h", "help", false, "prints this message.");
-        options.addOption("s", "start", true, "the start rowkey of the range. Defaults to '" + DEFAULT_START_KEY + "'");
-        options.addOption("c", "clustername", true, "the name of the cluster. Defaults to '" + DEFAULT_CLUSTER_NAME + "'");
-        options.addOption("e", "end", true, "the end rowkey of the range. Defaults to '" + DEFAULT_END_KEY + "'");
-        options.addOption("p", "pagesize", true,
-                "number of records read per batch from cassandra. Defaults to '" + DEFAULT_PAGE_SIZE + "'");
-        options.addOption("rt", "readthreads", true,
-                "number of reading threads. Defaults to '" + DEFAULT_READ_THREADS + "'");
-        options.addOption("wt", "writethreads", true,
-                "number of writing threads. Defaults to '" + DEFAULT_WRITE_THREADS + "'");
-        options.addOption("sb", "solrbase", true, "SOLR base address. Defaults to '" + DEFAULT_SOLR_BASE + "'");
-        options.addOption("cf", "columnfamily", true,
-                "Column Family name to be copied over. Defaults to '" + DEFAULT_COLUMN_FAMILY + "'");
-        options.addOption("ks", "keyspace", true,
-                "Keyspace name to be copied over. Defaults to '" + DEFAULT_KEY_SPACE + "'");
-        options.addOption("sdb", "sourcedb", true,
-                "Source database address. Defaults to '" + DEFAULT_SOURCE_DB + "'");
-        options.addOption("tdb", "targetdb", true,
-                "Comma separated target database addresses. Defaults to '" + DEFAULT_TARGET_DB + "'");
-        options.addOption("sync", "syncschema", false,
-                "Synchronise the target schema. Defaults to '" + DEFAULT_SYNC + "'");
+        options.addOption("c", "config", true, "The application config file path, defaults to '" + DEFAULT_APP_CONFIG + "'");
 
         try {
             // parse the command line arguments
@@ -405,47 +439,11 @@ public class CMigrate {
                 helpFormatter.printHelp("CMigrate", options);
                 return;
             }
-
-            final String startKey = line.getOptionValue("start", DEFAULT_START_KEY);
-            final String endKey = line.getOptionValue("end", DEFAULT_END_KEY);
-            final int pageSize = Integer.parseInt(line.getOptionValue("pagesize", DEFAULT_PAGE_SIZE));
-            final int readThreads = Integer.parseInt(line.getOptionValue("readthreads", DEFAULT_READ_THREADS));
-            final int writeThreads = Integer.parseInt(line.getOptionValue("writethreads", DEFAULT_WRITE_THREADS));
-            final String columnfamily = line.getOptionValue("columnfamily", DEFAULT_COLUMN_FAMILY);
-            final String keySpace = line.getOptionValue("keyspace", DEFAULT_KEY_SPACE);
-            final String clusterName = line.getOptionValue("clustername", DEFAULT_CLUSTER_NAME);
-            final String sourcedb = line.getOptionValue("sourcedb", DEFAULT_SOURCE_DB);
-            final String[] targetdb = line.getOptionValue("targetdb", DEFAULT_TARGET_DB).split(",");
-            final Boolean sync = line.hasOption("syncschema");
-
-            final String solrBase = line.getOptionValue("solrbase", DEFAULT_SOLR_BASE);
-
-            final Map<String, String> keyRanges = new TreeMap<>();
-            keyRanges.put(startKey, endKey);
-            switch (columnfamily) {
-                case "occ":
-                    final Map<String, String> occKeyRanges = getOccKeyRanges(startKey, endKey, readThreads, solrBase);
-                    copyColumnFmaily(clusterName, columnfamily, keySpace, occKeyRanges, new OccMapper(keySpace, columnfamily), sourcedb,
-                            targetdb, readThreads, writeThreads, pageSize, solrBase, sync);
-                    break;
-                case "loc":
-                    copyColumnFmaily(clusterName, columnfamily, keySpace, keyRanges, new LocMapper(keySpace, columnfamily), sourcedb,
-                            targetdb, readThreads, writeThreads, pageSize, solrBase, sync);
-                    break;
-                case "attr":
-                    copyColumnFmaily(clusterName, columnfamily, keySpace, keyRanges, new AttrMapper(keySpace, columnfamily), sourcedb,
-                            targetdb, readThreads, writeThreads, pageSize, solrBase, sync);
-                    break;
-                case "qid":
-                    copyColumnFmaily(clusterName, columnfamily, keySpace, keyRanges, new QidMapper(keySpace, columnfamily), sourcedb,
-                            targetdb, readThreads, writeThreads, pageSize, solrBase, sync);
-                    break;
-                case "qa":
-                    copyColumnFmaily(clusterName, columnfamily, keySpace, keyRanges, new QaMapper(keySpace, columnfamily), sourcedb,
-                            targetdb, readThreads, writeThreads, pageSize, solrBase, sync);
-                    break;
-                default:
-                    throw new ParseException("Invalid name for columnFamily: " + columnfamily);
+            String configFile = line.getOptionValue("config", DEFAULT_APP_CONFIG);
+            Config config = readConfig(configFile);
+            if (config.getSource().get("type").equalsIgnoreCase("cassandra1") &&
+                    config.getTarget().get("type").equalsIgnoreCase("cassandra3")) {
+                migrateCass1ToCass3(config);
             }
 
         } catch (ParseException exp) {

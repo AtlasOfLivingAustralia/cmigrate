@@ -1,0 +1,19 @@
+startKey: ""
+endKey: "~"
+pageSize: 1000
+readThreads: 4
+writeThreads: 4
+syncSchema: false
+solrBase: "http://localhost:8080/solr/biocache"
+source:
+  type: "cassandra1"
+  db: "aws-cass-cluster-1.ala.org.au"
+  clusterName: "Biocache"
+  keySpace: "occ"
+  columnFamily: "occ,qid,qa"
+target:
+  type: "cassandra3"
+  db: "aws-cass-cluster-1.ala.org.au,aws-cass-cluster-4.ala.org.au,aws-cass-cluster-3.ala.org.au"
+  clusterName: "Biocache"
+  keySpace: "occ"
+
